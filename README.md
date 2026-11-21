@@ -60,6 +60,35 @@ Buttons are debounced in software. Menu navigation uses short presses. In normal
 
 Open the menu by holding MODE for 15 seconds. The menu includes **Add Schedule**, **View Schedules**, and **Exit**.
 
+### LCD menu flow
+
+```text
+MAIN MENU
+    |
+    +-- Add Schedule
+    |      |
+    |      +-- Select Interval
+    |      |     +-- Every 4 Hours
+    |      |     +-- Every 6 Hours
+    |      |     +-- Every 8 Hours
+    |      |     +-- Every 12 Hours
+    |      |
+    |      +-- Select Duration
+    |      |     +-- Days: 1, 3, or 5
+    |      |     +-- Weeks: 1, 2, or 3
+    |      |     +-- Months: 1, 6, or 12
+    |      |
+    |      +-- Save Schedule
+    |
+    +-- View Schedules
+    |      +-- View Details
+    |      +-- Delete Schedule (confirmation required)
+    |
+    +-- Exit
+```
+
+The 20×4 LCD shows three options at a time when a list is longer than the available rows. The `>` marker identifies the selected option; use NEXT/PREVIOUS to scroll.
+
 To add a schedule:
 
 1. Select **Add Schedule** and press SAVE.
