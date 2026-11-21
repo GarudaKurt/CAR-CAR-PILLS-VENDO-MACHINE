@@ -1,97 +1,107 @@
 # Pill Reminder and Dispensing Controller
 
-Arduino project for four independently configurable medication schedules. The DS3231 RTC supplies the date and time used to decide when reminders are due. A reminder never starts dispensing on its own: personnel must press the matching medication button.
+Arduino Mega-class pill reminder controller with a DS3231 RTC, 20×4 I²C LCD, menu-driven schedule setup, EEPROM persistence, buzzer reminders, and servo dispensing.
 
 ## Hardware and libraries
 
-- Arduino board with enough digital pins for the assignments below (the current pin map is intended for a Mega-class board).
-- DS3231 RTC module connected to the I2C bus.
-- 20×4 I2C LCD connected to the same I2C bus.
-- `LiquidCrystal_I2C` library for the LCD. The RTC is read directly with Arduino's built-in `Wire` library; a separate `DS3231.h` library is not required.
-- Four continuous-rotation medication servos, one Spoon servo, four active-low IR sensors, five push buttons, a buzzer, relay, and LEDs.
+- Arduino Mega 2560 or compatible board with the listed pins and internal EEPROM.
+- DS3231 RTC connected over I²C. The sketch reads its registers through Arduino's built-in `Wire` library; a separate `DS3231.h` library is not required.
+- 20×4 I²C LCD and the `LiquidCrystal_I2C` Arduino library.
+- Four continuous-rotation medication servos, one Spoon servo, four active-low IR sensors, five buttons, a buzzer, a relay, and LEDs.
 
-The LCD address defaults to `0x27`. If the LCD backpack uses `0x3F`, change `LCD_I2C_ADDRESS` in `deviceConfig.h`. The RTC uses I2C address `0x68`. Connect both modules to the board's SDA/SCL pins and share ground.
+The LCD address defaults to `0x27`. Change `LCD_I2C_ADDRESS` in `deviceConfig.h` to `0x3F` if that is the address of your LCD backpack. The RTC uses I²C address `0x68`. Connect the RTC and LCD to the board's SDA/SCL pins and share ground. On a Mega 2560, SDA/SCL are pins 20/21.
 
-The sketch reads the RTC but does not set its clock. Set the DS3231 date/time before use and make sure its oscillator-stop flag is clear; otherwise the scheduler reports the RTC as unavailable and pauses reminders. On an Arduino Mega, SDA/SCL are pins 20/21.
+The sketch reads but does not set the DS3231 clock. Set its date and time before use and clear its oscillator-stop flag. Scheduling pauses if the RTC is missing, invalid, or has its oscillator-stop flag set.
 
 ## Pin assignments
 
 | Function | Pin |
 | --- | ---: |
-| 1-hour medication servo / button / IR | 7 / 41 / 13 |
-| 2-hour medication servo / button / IR | 6 / 43 / 12 |
-| 4-hour medication servo / button / IR | 5 / 45 / 11 |
-| 8-hour medication servo / button / IR | 4 / 47 / 10 |
+| NEXT button | 41 |
+| PREVIOUS button | 43 |
+| SAVE / confirm / reminder acknowledgment button | 45 |
+| BACK / cancel button | 47 |
+| MODE / schedule-menu button | 39 |
+| Every 4 hours servo / IR sensor | 5 / 11 |
+| Every 6 hours servo / IR sensor | 6 / 12 |
+| Every 8 hours servo / IR sensor | 4 / 10 |
+| Every 12 hours servo / IR sensor | 7 / 13 |
 | Spoon servo | 3 |
-| TEST/PRODUCTION mode button | 39 |
-| Disinfection relay | 40 |
-| Buzzer | 46 |
+| Relay / buzzer | 40 / 46 |
 | Green LED / red LED | 49 / 48 |
-| LCD I2C address | `0x27` by default |
 
-Buttons use `INPUT_PULLUP`: connect one side of each button to its assigned pin and the other side to GND. A pressed button reads LOW. IR sensors are also configured active-low; change `IR_ACTIVE_LEVEL` in `deviceConfig.h` if the sensor output polarity differs.
+All buttons use `INPUT_PULLUP`: connect one side to the assigned pin and the other side to GND. A pressed button reads LOW. The IR sensors are configured active-low; change `IR_ACTIVE_LEVEL` in `deviceConfig.h` if your sensor output polarity differs.
 
-The red LED and buzzer pins were moved from the conflicting original assignments: the original red LED pin overlapped the 1-hour button, and the original buzzer pin overlapped the 2-hour button. Wire them to pins 48 and 46 respectively.
+## Button controls
 
-## Button configuration
+### Mode and menu access
 
-Perform configuration while the controller is ready, with no reminder waiting and no dispensing operation in progress.
+Use the separate MODE button on pin 39 while on the normal screen and when no reminder is pending:
 
-### Register or remove a medication schedule
+- Hold for **3 seconds to under 5 seconds, then release** to select TEST mode.
+- Hold for **5 seconds to under 15 seconds, then release** to select PRODUCTION mode.
+- Hold for **15 seconds** to open the schedule main menu. A 15-second hold does not change the mode.
+- Holds under 3 seconds do not change the mode.
 
-Use the button associated with the interval you want:
+Mode is retained in EEPROM. Mode changes are ignored while a reminder is pending or dispensing is underway.
 
-| Button | Schedule |
+### Menu keys
+
+| Button | Menu action |
 | --- | --- |
-| `BtnOneHr` (41) | Every 1 hour |
-| `BtnTwoHr` (43) | Every 2 hours |
-| `BtnFourHr` (45) | Every 4 hours |
-| `BtnEightHr` (47) | Every 8 hours |
+| NEXT, pin 41 | Move to the next option or schedule |
+| PREVIOUS, pin 43 | Move to the previous option or schedule |
+| SAVE, pin 45 | Confirm, open details, delete after confirmation, or acknowledge a due reminder on the normal screen |
+| BACK, pin 47 | Return to the previous screen or cancel |
 
-- Hold a schedule button for **5 seconds or more, but less than 10 seconds, then release** to register that schedule.
-- Hold it for **10 seconds** to unregister that schedule. Removal happens when the hold reaches 10 seconds.
-- A short press under 5 seconds does not change registration while the system is ready.
-- Only registered schedules will generate reminders. For example, to use only the 2-hour and 4-hour schedules, register buttons 43 and 45 and ensure buttons 41 and 47 are unregistered.
+Buttons are debounced in software. Menu navigation uses short presses. In normal operation, pressing SAVE acknowledges the current due reminder; the buzzer continues until acknowledgment.
 
-The registered schedule selection is saved in the Arduino board's internal EEPROM and is retained after restart. Registration starts a fresh interval using the current RTC time. After a restart, enabled schedules also start a fresh interval from the current RTC time; individual next-due timestamps are not saved.
+## Schedule menu
 
-### Select TEST or PRODUCTION mode
+Open the menu by holding MODE for 15 seconds. The menu includes **Add Schedule**, **View Schedules**, and **Exit**.
 
-Use the separate mode button on pin 39 while the controller is ready:
+To add a schedule:
 
-- Hold for **3 seconds, then release before 5 seconds** to select TEST mode.
-- Hold until **5 seconds** to select PRODUCTION mode. PRODUCTION is selected at the 5-second mark, even if the button remains held.
-- Holds shorter than 3 seconds do not change mode.
+1. Select **Add Schedule** and press SAVE.
+2. Choose one fixed interval: **4, 6, 8, or 12 hours**. Press SAVE. The menu automatically proceeds to duration selection.
+3. Choose **Days**, **Weeks**, or **Months** and press SAVE.
+4. Choose a duration and press SAVE: Days are 1, 3, or 5; Weeks are 1, 2, or 3; Months are 1, 6, or 12.
+5. Review the summary and press SAVE to create the schedule. BACK returns to the previous step.
 
-The selected mode is saved in internal EEPROM. Changing mode recalculates the next reminder for every registered schedule from the DS3231's current time. Mode changes are ignored while a reminder is queued or dispensing is in progress.
+The schedule starts at the DS3231's current date and time. Its first reminder is due one selected interval later. Its expiration timestamp is the activation time plus the selected duration. Month durations use calendar months and clamp to the last day of the target month when necessary (for example, January 31 plus one month expires on February's last day).
+
+Select **View Schedules** to browse active schedules. Open a schedule with SAVE; NEXT/PREVIOUS switch between its detail pages. From the details page, SAVE opens a delete confirmation. SAVE confirms deletion; BACK cancels. Expired schedules are removed from EEPROM automatically.
+
+The firmware stores up to 12 active schedule records. Each record has a unique ID, interval, duration type/value, RTC start and expiration timestamps, next reminder time, and pending-reminder state. The EEPROM database has a version and checksum. Active schedules and pending reminders are restored after restart; a restored pending reminder still requires a fresh SAVE acknowledgment.
 
 ## Reminder intervals
 
-| Schedule | TEST mode | PRODUCTION mode |
+| Selection | PRODUCTION interval | TEST interval |
 | --- | ---: | ---: |
-| EveryOneHr | 1 minute 15 seconds | 1 hour |
-| EveryTwoHr | 2 minutes 20 seconds | 2 hours |
-| EveryFourHr | 5 minutes | 4 hours |
-| EveryEightHr | 8 minutes | 8 hours |
+| Every 4 Hours | 4 hours | 5 minutes |
+| Every 6 Hours | 6 hours | 6 minutes |
+| Every 8 Hours | 8 hours | 8 minutes |
+| Every 12 Hours | 12 hours | 12 minutes |
 
-## Reminder and dispensing sequence
+TEST mode preserves the selected 4/6/8/12-hour configuration while shortening the runtime interval. The existing 4-hour and 8-hour test mappings (5 and 8 minutes) are retained; the new 6- and 12-hour options use 6 and 12 minutes.
 
-1. The scheduler polls the DS3231 and queues a reminder when a registered schedule becomes due.
-2. The buzzer sounds until personnel press the matching medication button. If several schedules are due, they are handled one at a time in queue order.
-3. The matching medication servo attaches and rotates. Its matching IR sensor stops it by detaching the servo when the pill is detected.
-4. The Spoon servo moves to 180°, holds for 4 seconds, and returns to 0°.
-5. The disinfection relay turns on for 10 seconds, then turns off and the controller returns to ready state.
+## Dispensing behavior
 
-The medication servo detaches after 30 seconds if its IR sensor does not detect a pill. That request is ended without repeating the dispense. An unacknowledged reminder expires after one full interval; stale or missed periods are skipped rather than dispensing automatically.
+When a schedule becomes due, the scheduler records one pending reminder and the controller sounds the buzzer. Press SAVE on the normal screen to acknowledge it. The interval selects the matching medication servo and IR sensor. The servo attaches to dispense and detaches when its IR sensor detects a pill. If no pill is detected within 30 seconds, the servo detaches and that request ends without retrying.
 
-`Servo.detach()` stops the servo control pulses; it does not switch off the servo's power supply. Verify the MG995 behavior on the assembled hardware before relying on the mechanism.
+After an IR hit, the Spoon moves to 180°, holds for 4 seconds, and returns to 0°. The disinfection relay then runs for 10 seconds and turns off. Multiple due schedules are handled one at a time. Missed intervals are skipped; unacknowledged pending reminders expire after one interval and never cause automatic dispensing.
+
+`Servo.detach()` stops the servo control pulses; it does not switch off servo power. Verify MG995 behavior on the assembled device before relying on it as the only stop mechanism.
 
 ## LCD and Serial Monitor
 
-The LCD shows the DS3231 date/time, the current mode as `MODE: TEST` or `MODE: PRODUCTION`, which intervals are registered, and the pending schedule when a reminder is active. The ready screen shows the schedule-button hold instructions.
+The normal LCD screen shows the DS3231 date/time, `MODE: TEST` or `MODE: PRODUCTION`, the number of active schedules, and any due schedule. Menu screens show the available intervals, duration values, active schedule list, details, and delete confirmation.
 
-Open the Serial Monitor at **115200 baud** for the mode, interval/deadline, reminder, acknowledgment, servo, IR, Spoon, relay, RTC, and error logs.
+Open the Serial Monitor at **115200 baud** for RTC errors, mode changes, EEPROM schedule saves/deletes, reminder activation, acknowledgment, servo operation, IR detection, timeout, Spoon movement, and relay events.
 
-## Build notes
+## Code organization
 
-The sketch is split into `SchedulingModule`, `DispenseModule`, and `DisplayModule`, with pin and LCD-address settings in `deviceConfig.h`. Install the `LiquidCrystal_I2C` Arduino library before compiling. Confirm the library's constructor/init API matches the installed version if your library package differs.
+- `SchedulingModule` reads the DS3231, calculates intervals/expiration, maintains pending reminders, and stores schedule records in EEPROM.
+- `DisplayModule` handles the LCD, buttons, menus, mode selection, and reminder acknowledgment.
+- `DispenseModule` runs the non-blocking servo, IR, Spoon, buzzer, and relay workflow.
+- `deviceConfig.h` contains hardware pins and LCD address.

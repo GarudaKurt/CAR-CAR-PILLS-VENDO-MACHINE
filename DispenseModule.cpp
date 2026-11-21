@@ -1,205 +1,149 @@
 #include "DispenseModule.h"
 
 namespace {
-constexpr uint32_t kButtonDebounceMs = 35UL;
-constexpr uint32_t kRegistrationHoldMs = 5000UL;
-constexpr uint32_t kUnregisterHoldMs = 10000UL;
-constexpr uint32_t kTestModeHoldMs = 3000UL;
-constexpr uint32_t kProductionModeHoldMs = 5000UL;
 constexpr uint32_t kDispenseTimeoutMs = 30000UL;
 constexpr uint32_t kSpoonHoldMs = 4000UL;
 constexpr uint32_t kDisinfectionMs = 10000UL;
 constexpr uint32_t kBuzzerPeriodMs = 500UL;
 }
 
-uint8_t Controller::servoPin(uint8_t index) {
-  static const uint8_t pins[] = {ServoOneHr, ServoTwoHr, ServoFourHr, ServoEightHr};
-  return pins[index];
+uint8_t Controller::servoPin(TimeSchedule interval) const {
+  switch (interval) {
+    case TimeSchedule::EveryFourHr: return ServoFourHr;
+    case TimeSchedule::EverySixHr: return ServoSixHr;
+    case TimeSchedule::EveryEightHr: return ServoEightHr;
+    case TimeSchedule::EveryTwelveHr: return ServoTwelveHr;
+  }
+  return 0;
 }
 
-uint8_t Controller::sensorPin(uint8_t index) {
-  static const uint8_t pins[] = {IROneHr, IRTwoHr, IRFourHr, IREightHr};
-  return pins[index];
-}
-
-uint8_t Controller::buttonPin(uint8_t index) {
-  static const uint8_t pins[] = {BtnOneHr, BtnTwoHr, BtnFourHr, BtnEightHr};
-  return pins[index];
+uint8_t Controller::sensorPin(TimeSchedule interval) const {
+  switch (interval) {
+    case TimeSchedule::EveryFourHr: return IRFourHr;
+    case TimeSchedule::EverySixHr: return IRSixHr;
+    case TimeSchedule::EveryEightHr: return IREightHr;
+    case TimeSchedule::EveryTwelveHr: return IRTwelveHr;
+  }
+  return 0;
 }
 
 void Controller::begin() {
-  for (uint8_t i = 0; i < 4; ++i) {
-    pinMode(sensorPin(i), INPUT_PULLUP);
-    pinMode(buttonPin(i), INPUT_PULLUP);
-    // Continuous-rotation medication servos stay detached until authorized.
-    medicationServos_[i].detach();
-  }
+  pinMode(IRFourHr, INPUT_PULLUP);
+  pinMode(IRSixHr, INPUT_PULLUP);
+  pinMode(IREightHr, INPUT_PULLUP);
+  pinMode(IRTwelveHr, INPUT_PULLUP);
+  medicationServo_.detach();
   spoonServo_.attach(ServoSpoon);
   spoonServo_.write(SPOON_HOME);
   pinMode(Relay, OUTPUT);
   digitalWrite(Relay, LOW);
   pinMode(Buzzer, OUTPUT);
   digitalWrite(Buzzer, LOW);
-  pinMode(BtnMode, INPUT_PULLUP);
   pinMode(LEDgreen, OUTPUT);
   pinMode(LEDred, OUTPUT);
   digitalWrite(LEDgreen, HIGH);
   digitalWrite(LEDred, LOW);
-  Serial.println(F("Dispensing controller ready. IR sensors configured active-low."));
+  Serial.println(F("Dispensing controller ready; medication servo attaches only after SAVE acknowledgment."));
 }
 
-void Controller::enterAwaitButton(TimeSchedule schedule) {
-  state_ = State::AwaitButton;
-  stateStarted_ = millis();
-  buttonArmed_[(uint8_t)schedule] = digitalRead(buttonPin((uint8_t)schedule)) == HIGH;
-  lastBuzzerToggle_ = 0;
+void Controller::enterAwaitAcknowledgment(const ScheduleRecord &record) {
+  activeScheduleId_ = record.id;
+  state_ = State::AwaitAcknowledgment;
+  lastBuzzerToggle_ = millis();
   buzzerOn_ = false;
+  digitalWrite(Buzzer, LOW);
   digitalWrite(LEDgreen, LOW);
   digitalWrite(LEDred, HIGH);
-  Serial.print(F("Reminder active; awaiting personnel button for "));
-  Serial.println(Schedule::scheduleName(schedule));
+  Serial.print(F("Reminder active; waiting for SAVE acknowledgment, schedule #"));
+  Serial.println(record.id);
 }
 
-void Controller::startDispensing(TimeSchedule schedule, uint8_t index) {
-  activeIndex_ = index;
-  buttonArmed_[index] = false;
-  digitalWrite(Buzzer, LOW);
-  buzzerOn_ = false;
-  digitalWrite(LEDred, LOW);
-  Serial.print(F("Button acknowledged: ")); Serial.println(Schedule::scheduleName(schedule));
-  Serial.print(F("Attaching medication servo on pin ")); Serial.println(servoPin(index));
-  medicationServos_[index].attach(servoPin(index));
-  medicationServos_[index].write(SERVO_FORWARD);
-  Serial.print(F("Medication servo running: ")); Serial.println(Schedule::scheduleName(schedule));
+void Controller::startDispensing(const ScheduleRecord &record) {
+  const TimeSchedule interval = (TimeSchedule)record.intervalHours;
+  activeServoPin_ = servoPin(interval);
+  activeSensorPin_ = sensorPin(interval);
+  activeScheduleId_ = record.id;
+  Serial.print(F("Attaching servo pin ")); Serial.println(activeServoPin_);
+  medicationServo_.attach(activeServoPin_);
+  medicationServo_.write(SERVO_FORWARD);
+  Serial.print(F("Servo started for schedule #")); Serial.println(record.id);
   stateStarted_ = millis();
   state_ = State::Dispensing;
+  buzzerOn_ = false;
+  digitalWrite(Buzzer, LOW);
+  digitalWrite(LEDred, LOW);
 }
 
-void Controller::finishCurrent(Schedule &schedule) {
+void Controller::finishCurrent(Schedule &schedule, bool success) {
+  medicationServo_.detach();
   digitalWrite(Relay, LOW);
   digitalWrite(Buzzer, LOW);
   digitalWrite(LEDred, LOW);
   digitalWrite(LEDgreen, HIGH);
+  if (success) Serial.println(F("Dispensing and disinfection workflow complete."));
+  schedule.completeCurrent(activeScheduleId_);
+  activeScheduleId_ = 0;
+  activeServoPin_ = 0;
+  activeSensorPin_ = 0;
   state_ = State::Ready;
-  activeIndex_ = -1;
-  schedule.completeCurrent();
 }
 
 void Controller::loop(Schedule &schedule) {
-  TimeSchedule currentSchedule;
-  const bool hasCurrent = schedule.current(currentSchedule);
+  ScheduleRecord currentRecord;
+  const bool hasCurrent = schedule.current(currentRecord);
 
-  if (digitalRead(BtnMode) == HIGH) {
-    if (modeButtonTiming_ && !modeButtonHandled_ &&
-        state_ == State::Ready && !hasCurrent) {
-      const uint32_t heldMs = (uint32_t)(millis() - modeButtonSince_);
-      if (heldMs >= kTestModeHoldMs && heldMs < kProductionModeHoldMs)
-        schedule.setTestMode(true);
-      else if (heldMs >= kProductionModeHoldMs)
-        schedule.setTestMode(false);
-    }
-    modeButtonTiming_ = false;
-    modeButtonHandled_ = false;
-  } else if (state_ == State::Ready && !hasCurrent) {
-    if (!modeButtonTiming_) {
-      modeButtonTiming_ = true;
-      modeButtonSince_ = millis();
-    }
-    if ((uint32_t)(millis() - modeButtonSince_) >= kProductionModeHoldMs &&
-        !modeButtonHandled_) {
-      schedule.setTestMode(false);
-      modeButtonHandled_ = true;
-    }
-  } else {
-    modeButtonTiming_ = false;
-  }
+  if (state_ == State::Ready && hasCurrent)
+    enterAwaitAcknowledgment(currentRecord);
 
-  // Re-arm a button only after release; this prevents repeated dispensing on a hold.
-  for (uint8_t i = 0; i < 4; ++i) {
-    if (digitalRead(buttonPin(i)) == HIGH) {
-      if (registrationTiming_[i] && !registrationHandled_[i] &&
-          state_ == State::Ready && !hasCurrent) {
-        const uint32_t heldMs = (uint32_t)(millis() - registrationSince_[i]);
-        if (heldMs >= kUnregisterHoldMs) {
-          schedule.setRegistration((TimeSchedule)i, false);
-          registrationHandled_[i] = true;
-        } else if (heldMs >= kRegistrationHoldMs) {
-          schedule.setRegistration((TimeSchedule)i, true);
-          registrationHandled_[i] = true;
-        }
-      }
-      buttonArmed_[i] = true;
-      buttonLowSince_[i] = 0;
-      registrationTiming_[i] = false;
-      registrationHandled_[i] = false;
+  if (state_ == State::AwaitAcknowledgment) {
+    if (!hasCurrent) {
+      digitalWrite(Buzzer, LOW);
+      digitalWrite(LEDred, LOW);
+      digitalWrite(LEDgreen, HIGH);
+      activeScheduleId_ = 0;
+      state_ = State::Ready;
+      return;
     }
-  }
-
-  if (state_ == State::Ready && !hasCurrent) {
-    for (uint8_t i = 0; i < 4; ++i) {
-      if (digitalRead(buttonPin(i)) != LOW || registrationHandled_[i]) continue;
-      if (!registrationTiming_[i]) {
-        registrationTiming_[i] = true;
-        registrationSince_[i] = millis();
-      }
-      if ((uint32_t)(millis() - registrationSince_[i]) >= kUnregisterHoldMs) {
-        schedule.setRegistration((TimeSchedule)i, false);
-        buttonArmed_[i] = false;
-        registrationHandled_[i] = true;
-        registrationTiming_[i] = false;
-      }
-    }
-  } else {
-    for (uint8_t i = 0; i < 4; ++i) registrationTiming_[i] = false;
-  }
-
-  if (state_ == State::Ready && hasCurrent) enterAwaitButton(currentSchedule);
-
-  if (state_ == State::AwaitButton && hasCurrent) {
+    if (currentRecord.id != activeScheduleId_)
+      enterAwaitAcknowledgment(currentRecord);
     if ((uint32_t)(millis() - lastBuzzerToggle_) >= kBuzzerPeriodMs) {
       lastBuzzerToggle_ = millis();
       buzzerOn_ = !buzzerOn_;
       digitalWrite(Buzzer, buzzerOn_ ? HIGH : LOW);
     }
-    const uint8_t index = (uint8_t)currentSchedule;
-    if (buttonArmed_[index] && digitalRead(buttonPin(index)) == LOW) {
-      if (buttonLowSince_[index] == 0) buttonLowSince_[index] = millis();
-      if ((uint32_t)(millis() - buttonLowSince_[index]) >= kButtonDebounceMs) {
-        schedule.acknowledgeCurrent();
-        startDispensing(currentSchedule, index);
-      }
-    }
+    if (schedule.isAcknowledged(currentRecord.id)) startDispensing(currentRecord);
   }
 
-  if (state_ == State::Dispensing && activeIndex_ >= 0) {
-    if (digitalRead(sensorPin(activeIndex_)) == IR_ACTIVE_LEVEL) {
-      Serial.print(F("IR detected pill; detaching medication servo on pin "));
-      Serial.println(servoPin(activeIndex_));
-      medicationServos_[activeIndex_].detach();
-      Serial.print(F("Spoon servo moving to ")); Serial.println(SPOON_DISPENSE);
+  if (state_ == State::Dispensing) {
+    if (digitalRead(activeSensorPin_) == IR_ACTIVE_LEVEL) {
+      Serial.print(F("Pill detected by IR pin ")); Serial.print(activeSensorPin_);
+      Serial.println(F("; medication servo detached."));
+      medicationServo_.detach();
       spoonServo_.write(SPOON_DISPENSE);
+      Serial.println(F("Spoon servo to 180 degrees; holding for 4 seconds."));
       stateStarted_ = millis();
       state_ = State::SpoonHold;
     } else if ((uint32_t)(millis() - stateStarted_) >= kDispenseTimeoutMs) {
-      medicationServos_[activeIndex_].detach();
-      Serial.print(F("ERROR: IR sensor timeout for "));
-      Serial.print(Schedule::scheduleName((TimeSchedule)activeIndex_));
-      Serial.println(F("; servo detached, no repeat dispense queued."));
-      finishCurrent(schedule);
+      Serial.print(F("ERROR: dispense timeout for schedule #"));
+      Serial.println(activeScheduleId_);
+      medicationServo_.detach();
+      finishCurrent(schedule, false);
     }
   }
 
-  if (state_ == State::SpoonHold && (uint32_t)(millis() - stateStarted_) >= kSpoonHoldMs) {
-    Serial.print(F("Spoon servo returning to ")); Serial.println(SPOON_HOME);
+  if (state_ == State::SpoonHold &&
+      (uint32_t)(millis() - stateStarted_) >= kSpoonHoldMs) {
     spoonServo_.write(SPOON_HOME);
-    Serial.println(F("Disinfection relay ON for 10 seconds."));
+    Serial.println(F("Spoon servo returned to 0 degrees; disinfection relay ON."));
     digitalWrite(Relay, HIGH);
     stateStarted_ = millis();
     state_ = State::RelayActive;
   }
 
-  if (state_ == State::RelayActive && (uint32_t)(millis() - stateStarted_) >= kDisinfectionMs) {
-    Serial.println(F("Disinfection relay OFF."));
-    finishCurrent(schedule);
+  if (state_ == State::RelayActive &&
+      (uint32_t)(millis() - stateStarted_) >= kDisinfectionMs) {
+    Serial.println(F("Disinfection relay OFF after 10 seconds."));
+    digitalWrite(Relay, LOW);
+    finishCurrent(schedule, true);
   }
 }

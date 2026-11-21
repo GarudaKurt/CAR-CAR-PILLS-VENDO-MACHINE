@@ -5,48 +5,79 @@
 #include <EEPROM.h>
 #include "deviceConfig.h"
 
+struct ScheduleRecord {
+  uint16_t id;
+  uint8_t intervalHours;
+  uint8_t durationType;
+  uint8_t durationValue;
+  uint8_t status;
+  uint8_t reminderPending;
+  uint8_t reserved;
+  uint32_t startEpoch;
+  uint32_t expirationEpoch;
+  uint32_t nextReminderEpoch;
+  uint32_t pendingEpoch;
+};
+
 class Schedule {
  public:
+  static constexpr uint8_t kMaxSchedules = 12;
+
   void begin();
   void loop();
 
-  bool current(TimeSchedule &schedule) const;
+  bool current(ScheduleRecord &record) const;
   bool currentTime(uint32_t &epoch) const;
-  bool isRegistered(TimeSchedule schedule) const;
-  void acknowledgeCurrent();
-  void completeCurrent();
-  bool setRegistration(TimeSchedule schedule, bool registered);
-  bool setTestMode(bool testMode);
-  bool isTestMode() const { return testMode_; }
+  bool isAcknowledged(uint16_t id) const;
+  bool acknowledgeCurrent();
+  void completeCurrent(uint16_t id);
 
-  uint32_t intervalSeconds(TimeSchedule schedule) const;
-  static const char *scheduleName(TimeSchedule schedule);
+  bool createSchedule(TimeSchedule interval, DurationType durationType,
+                      uint8_t durationValue, uint16_t &createdId);
+  bool deleteScheduleAt(uint8_t index);
+  uint8_t scheduleCount() const;
+  bool scheduleAt(uint8_t index, ScheduleRecord &record) const;
+
+  bool setTestMode(bool testMode);
+  bool isTestMode() const { return database_.mode != 0; }
+  uint32_t intervalSeconds(TimeSchedule interval) const;
+
+  static const char *scheduleName(TimeSchedule interval);
+  static const char *durationName(DurationType type);
 
  private:
-  static constexpr uint8_t kScheduleCount = 4;
-  TimeSchedule queue_[kScheduleCount];
-  bool queued_[kScheduleCount] = {false, false, false, false};
-  bool enabled_[kScheduleCount] = {false, false, false, false};
-  bool acknowledged_[kScheduleCount] = {false, false, false, false};
-  uint32_t pendingSince_[kScheduleCount] = {0, 0, 0, 0};
-  uint8_t head_ = 0;
-  uint8_t tail_ = 0;
-  uint8_t count_ = 0;
-  uint32_t nextDue_[kScheduleCount] = {0, 0, 0, 0};
-  bool initialized_ = false;
+  static constexpr uint32_t kDatabaseMagic = 0x50494C4CUL;
+  static constexpr uint8_t kDatabaseVersion = 1;
+  static constexpr int kEepromAddress = 64;
+
+  struct Database {
+    uint32_t magic;
+    uint8_t version;
+    uint8_t mode;
+    uint8_t count;
+    uint8_t reserved;
+    uint16_t nextId;
+    ScheduleRecord records[kMaxSchedules];
+    uint16_t checksum;
+  };
+
+  Database database_{};
   bool rtcReady_ = false;
-  bool testMode_ = TEST_MODE != 0;
-  uint32_t lastClockLog_ = 0;
-  uint32_t lastScheduleLog_ = 0;
+  bool hasPolledRtc_ = false;
   uint32_t lastRtcPoll_ = 0;
   uint32_t currentEpoch_ = 0;
-  bool hasPolledRtc_ = false;
+  uint16_t acknowledgedId_ = 0;
 
   bool readRtc(uint32_t &epoch) const;
-  void enqueue(TimeSchedule schedule, uint32_t dueAt);
-  void expireUnacknowledged(uint32_t now);
-  void loadRegistrations();
-  void printScheduleStatus(uint32_t now);
+  void loadDatabase();
+  void saveDatabase();
+  uint16_t checksum(const Database &db) const;
+  void removeAt(uint8_t index);
+  bool validateDuration(DurationType type, uint8_t value) const;
+  bool validInterval(TimeSchedule interval) const;
+  uint32_t expirationFrom(uint32_t startEpoch, DurationType type,
+                          uint8_t value) const;
+  void processSchedules(uint32_t now);
 };
 
 #endif

@@ -15,6 +15,6 @@ void setup() {
 
 void loop() {
   medicationSchedule.loop();
-  dispensingController.loop(medicationSchedule);
   userDisplay.loop(medicationSchedule);
+  dispensingController.loop(medicationSchedule);
 }

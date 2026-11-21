@@ -1,13 +1,11 @@
 #include "SchedulingModule.h"
 #include <Wire.h>
+#include <stddef.h>
+#include <string.h>
 
 namespace {
-constexpr uint8_t kEepromMagicAddress = 0;
-constexpr uint8_t kEepromMaskAddress = 1;
-constexpr uint8_t kEepromModeAddress = 2;
-constexpr uint8_t kEepromMagic = 0xB7;
-constexpr uint8_t kEepromModeTest = 0x54;
-constexpr uint8_t kEepromModeProduction = 0x50;
+constexpr uint8_t kStatusActive = 1;
+constexpr uint8_t kStatusExpired = 2;
 
 uint8_t fromBcd(uint8_t value) {
   return (value >> 4) * 10 + (value & 0x0F);
@@ -32,94 +30,156 @@ uint32_t toEpoch(uint16_t year, uint8_t month, uint8_t day,
   return days * 86400UL + hour * 3600UL + minute * 60UL + second;
 }
 
-void printClock(uint32_t epoch) {
+void fromEpoch(uint32_t epoch, uint16_t &year, uint8_t &month, uint8_t &day,
+               uint8_t &hour, uint8_t &minute, uint8_t &second) {
+  uint32_t days = epoch / 86400UL;
   const uint32_t daySeconds = epoch % 86400UL;
-  const uint32_t days = epoch / 86400UL;
-  uint16_t year = 2000;
-  uint32_t remaining = days;
-  while (remaining >= (leapYear(year) ? 366UL : 365UL)) {
-    remaining -= leapYear(year) ? 366UL : 365UL;
+  year = 2000;
+  while (days >= (leapYear(year) ? 366UL : 365UL)) {
+    days -= leapYear(year) ? 366UL : 365UL;
     ++year;
   }
-  uint8_t month = 1;
-  while (remaining >= daysInMonth(year, month)) remaining -= daysInMonth(year, month++);
-  const uint8_t day = remaining + 1;
-  const uint8_t hour = daySeconds / 3600UL;
-  const uint8_t minute = (daySeconds % 3600UL) / 60UL;
-  const uint8_t second = daySeconds % 60UL;
-  if (month < 10) Serial.print('0'); Serial.print(month); Serial.print('/');
-  if (day < 10) Serial.print('0'); Serial.print(day); Serial.print('/');
-  Serial.print(year); Serial.print(' ');
+  month = 1;
+  while (days >= daysInMonth(year, month)) {
+    days -= daysInMonth(year, month);
+    ++month;
+  }
+  day = days + 1;
+  hour = daySeconds / 3600UL;
+  minute = (daySeconds % 3600UL) / 60UL;
+  second = daySeconds % 60UL;
+}
+
+void printDateTime(uint32_t epoch) {
+  uint16_t year;
+  uint8_t month, day, hour, minute, second;
+  fromEpoch(epoch, year, month, day, hour, minute, second);
+  Serial.print(year); Serial.print('-');
+  if (month < 10) Serial.print('0'); Serial.print(month); Serial.print('-');
+  if (day < 10) Serial.print('0'); Serial.print(day); Serial.print(' ');
   if (hour < 10) Serial.print('0'); Serial.print(hour); Serial.print(':');
   if (minute < 10) Serial.print('0'); Serial.print(minute); Serial.print(':');
   if (second < 10) Serial.print('0'); Serial.print(second);
 }
-
-void printEpoch(uint32_t epoch) { printClock(epoch); }
 }
 
-const char *Schedule::scheduleName(TimeSchedule schedule) {
-  switch (schedule) {
-    case TimeSchedule::EveryOneHr: return "EveryOneHr";
-    case TimeSchedule::EveryTwoHr: return "EveryTwoHr";
-    case TimeSchedule::EveryFourHr: return "EveryFourHr";
-    case TimeSchedule::EveryEightHr: return "EveryEightHr";
+const char *Schedule::scheduleName(TimeSchedule interval) {
+  switch (interval) {
+    case TimeSchedule::EveryFourHr: return "Every 4 Hours";
+    case TimeSchedule::EverySixHr: return "Every 6 Hours";
+    case TimeSchedule::EveryEightHr: return "Every 8 Hours";
+    case TimeSchedule::EveryTwelveHr: return "Every 12 Hours";
+  }
+  return "Invalid interval";
+}
+
+const char *Schedule::durationName(DurationType type) {
+  switch (type) {
+    case DurationType::Days: return "Days";
+    case DurationType::Weeks: return "Weeks";
+    case DurationType::Months: return "Months";
   }
   return "Unknown";
 }
 
-uint32_t Schedule::intervalSeconds(TimeSchedule schedule) const {
-if (testMode_) {
-  switch (schedule) {
-    case TimeSchedule::EveryOneHr: return 75UL;
-    case TimeSchedule::EveryTwoHr: return 140UL;
-    case TimeSchedule::EveryFourHr: return 300UL;
-    case TimeSchedule::EveryEightHr: return 480UL;
+uint32_t Schedule::intervalSeconds(TimeSchedule interval) const {
+  const uint8_t hours = (uint8_t)interval;
+  if (database_.mode) {
+    // Preserve the old 4h=5min and 8h=8min mappings; new choices
+    // use one test minute per selected production hour.
+    switch (interval) {
+      case TimeSchedule::EveryFourHr: return 300UL;
+      case TimeSchedule::EverySixHr: return 360UL;
+      case TimeSchedule::EveryEightHr: return 480UL;
+      case TimeSchedule::EveryTwelveHr: return 720UL;
+    }
+  } else {
+    return (uint32_t)hours * 3600UL;
   }
-} else {
-  switch (schedule) {
-    case TimeSchedule::EveryOneHr: return 3600UL;
-    case TimeSchedule::EveryTwoHr: return 7200UL;
-    case TimeSchedule::EveryFourHr: return 14400UL;
-    case TimeSchedule::EveryEightHr: return 28800UL;
-  }
-}
   return 0;
 }
 
-void Schedule::loadRegistrations() {
-  uint8_t mask = 0;
-  if (EEPROM.read(kEepromMagicAddress) == kEepromMagic)
-    mask = EEPROM.read(kEepromMaskAddress) & 0x0F;
-  const uint8_t storedMode = EEPROM.read(kEepromModeAddress);
-  if (storedMode == kEepromModeTest) testMode_ = true;
-  else if (storedMode == kEepromModeProduction) testMode_ = false;
-  for (uint8_t i = 0; i < kScheduleCount; ++i)
-    enabled_[i] = (mask & (1U << i)) != 0;
+uint16_t Schedule::checksum(const Database &db) const {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&db);
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < offsetof(Database, checksum); ++i) {
+    crc ^= (uint16_t)bytes[i] << 8;
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+  }
+  return crc;
+}
+
+void Schedule::saveDatabase() {
+  database_.magic = kDatabaseMagic;
+  database_.version = kDatabaseVersion;
+  database_.checksum = checksum(database_);
+  EEPROM.put(kEepromAddress, database_);
+}
+
+bool Schedule::validInterval(TimeSchedule interval) const {
+  return interval == TimeSchedule::EveryFourHr ||
+         interval == TimeSchedule::EverySixHr ||
+         interval == TimeSchedule::EveryEightHr ||
+         interval == TimeSchedule::EveryTwelveHr;
+}
+
+bool Schedule::validateDuration(DurationType type, uint8_t value) const {
+  switch (type) {
+    case DurationType::Days: return value == 1 || value == 3 || value == 5;
+    case DurationType::Weeks: return value == 1 || value == 2 || value == 3;
+    case DurationType::Months: return value == 1 || value == 6 || value == 12;
+  }
+  return false;
+}
+
+void Schedule::loadDatabase() {
+  EEPROM.get(kEepromAddress, database_);
+  bool valid = database_.magic == kDatabaseMagic &&
+               database_.version == kDatabaseVersion &&
+               database_.mode <= 1 && database_.count <= kMaxSchedules &&
+               database_.nextId != 0 && database_.checksum == checksum(database_);
+  if (valid) {
+    for (uint8_t i = 0; i < database_.count; ++i) {
+      const ScheduleRecord &record = database_.records[i];
+      if (record.id == 0 || !validInterval((TimeSchedule)record.intervalHours) ||
+          !validateDuration((DurationType)record.durationType, record.durationValue) ||
+          record.status != kStatusActive || record.startEpoch >= record.expirationEpoch ||
+          record.nextReminderEpoch < record.startEpoch) {
+        valid = false;
+        break;
+      }
+    }
+  }
+
+  if (!valid) {
+    memset(&database_, 0, sizeof(database_));
+    database_.mode = TEST_MODE ? 1 : 0;
+    database_.nextId = 1;
+    saveDatabase();
+    Serial.println(F("EEPROM schedule data invalid or uninitialized; defaults loaded."));
+  }
 }
 
 bool Schedule::readRtc(uint32_t &epoch) const {
-  Wire.beginTransmission(0x68); // DS3231 I2C address
+  Wire.beginTransmission(0x68);
   Wire.write((uint8_t)0x00);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom((uint8_t)0x68, (uint8_t)7) != 7) return false;
+  if (Wire.endTransmission(false) != 0 ||
+      Wire.requestFrom((uint8_t)0x68, (uint8_t)7) != 7) return false;
 
   const uint8_t rawSecond = Wire.read();
   const uint8_t rawMinute = Wire.read();
   const uint8_t rawHour = Wire.read();
-  Wire.read(); // weekday
+  Wire.read();
   const uint8_t rawDay = Wire.read();
   const uint8_t rawMonth = Wire.read();
   const uint8_t rawYear = Wire.read();
 
-  // The DS3231 oscillator-stop flag lives in status register 0x0F, not in
-  // the seconds register. Treat an unset clock as unavailable until repaired.
   Wire.beginTransmission(0x68);
   Wire.write((uint8_t)0x0F);
   if (Wire.endTransmission(false) != 0 ||
       Wire.requestFrom((uint8_t)0x68, (uint8_t)1) != 1) return false;
-  const uint8_t status = Wire.read();
-  if (status & 0x80) return false;
+  if (Wire.read() & 0x80) return false; // DS3231 oscillator-stop flag
 
   const uint8_t second = fromBcd(rawSecond & 0x7F);
   const uint8_t minute = fromBcd(rawMinute & 0x7F);
@@ -135,107 +195,146 @@ bool Schedule::readRtc(uint32_t &epoch) const {
   const uint16_t year = 2000 + fromBcd(rawYear);
   if (second > 59 || minute > 59 || hour > 23 || month < 1 || month > 12 ||
       day < 1 || day > daysInMonth(year, month)) return false;
-
   epoch = toEpoch(year, month, day, hour, minute, second);
   return true;
 }
 
+uint32_t Schedule::expirationFrom(uint32_t startEpoch, DurationType type,
+                                  uint8_t value) const {
+  if (type == DurationType::Days) return startEpoch + (uint32_t)value * 86400UL;
+  if (type == DurationType::Weeks) return startEpoch + (uint32_t)value * 7UL * 86400UL;
+
+  uint16_t year;
+  uint8_t month, day, hour, minute, second;
+  fromEpoch(startEpoch, year, month, day, hour, minute, second);
+  uint16_t totalMonth = year * 12U + (month - 1) + value;
+  year = totalMonth / 12U;
+  month = (totalMonth % 12U) + 1;
+  const uint8_t lastDay = daysInMonth(year, month);
+  if (day > lastDay) day = lastDay;
+  return toEpoch(year, month, day, hour, minute, second);
+}
+
 void Schedule::begin() {
   Wire.begin();
-  loadRegistrations();
-  Serial.println(F("Medication scheduler starting; DS3231 is the time source."));
-  Serial.print(F("Operating mode: "));
-  Serial.println(testMode_ ? F("TEST") : F("PRODUCTION"));
-  Serial.println(F("Schedule setup: ready state; release after 5-<10s to register, or hold 10s to unregister."));
-  Serial.println(F("Mode button pin 39: release 3-<5s for TEST, hold 5s for PRODUCTION."));
+  loadDatabase();
+  Serial.print(F("Medication scheduler ready; mode="));
+  Serial.println(isTestMode() ? F("TEST") : F("PRODUCTION"));
+  Serial.print(F("Active EEPROM schedules: "));
+  Serial.println(database_.count);
 }
 
-bool Schedule::setRegistration(TimeSchedule schedule, bool registered) {
-  const uint8_t index = (uint8_t)schedule;
-  if (index >= kScheduleCount || queued_[index]) return false;
-  if (enabled_[index] == registered) {
-    Serial.print(F("Schedule already "));
-    Serial.print(registered ? F("registered: ") : F("unregistered: "));
-    Serial.println(scheduleName(schedule));
-    return true;
-  }
-
+bool Schedule::createSchedule(TimeSchedule interval, DurationType durationType,
+                              uint8_t durationValue, uint16_t &createdId) {
+  if (!validInterval(interval) || !validateDuration(durationType, durationValue) ||
+      database_.count >= kMaxSchedules) return false;
   uint32_t now;
   if (!readRtc(now)) {
-    Serial.println(F("ERROR: cannot change registered schedules until the DS3231 time is valid."));
+    Serial.println(F("ERROR: schedule not saved; DS3231 time is invalid."));
     return false;
   }
 
-  enabled_[index] = registered;
-  if (enabled_[index]) {
-    nextDue_[index] = now + intervalSeconds(schedule);
-  } else {
-    nextDue_[index] = 0;
-  }
+  ScheduleRecord &record = database_.records[database_.count++];
+  memset(&record, 0, sizeof(record));
+  uint16_t candidateId = database_.nextId ? database_.nextId : 1;
+  bool idInUse;
+  do {
+    idInUse = false;
+    for (uint8_t i = 0; i + 1 < database_.count; ++i) {
+      if (database_.records[i].id == candidateId) {
+        idInUse = true;
+        ++candidateId;
+        if (candidateId == 0) candidateId = 1;
+        break;
+      }
+    }
+  } while (idInUse);
+  record.id = candidateId;
+  database_.nextId = candidateId + 1;
+  if (database_.nextId == 0) database_.nextId = 1;
+  record.intervalHours = (uint8_t)interval;
+  record.durationType = (uint8_t)durationType;
+  record.durationValue = durationValue;
+  record.status = kStatusActive;
+  record.startEpoch = now;
+  record.expirationEpoch = expirationFrom(now, durationType, durationValue);
+  record.nextReminderEpoch = now + intervalSeconds(interval);
+  createdId = record.id;
+  saveDatabase();
 
-  uint8_t mask = 0;
-  for (uint8_t i = 0; i < kScheduleCount; ++i)
-    if (enabled_[i]) mask |= (1U << i);
-  EEPROM.update(kEepromMaskAddress, mask);
-  EEPROM.update(kEepromMagicAddress, kEepromMagic);
-
-  Serial.print(F("Schedule "));
-  Serial.print(scheduleName(schedule));
-  Serial.print(enabled_[index] ? F(" registered; interval=") : F(" unregistered; interval="));
-  Serial.print(intervalSeconds(schedule));
-  Serial.println(F(" seconds."));
-  if (enabled_[index]) {
-    Serial.print(F("First reminder due: "));
-    printEpoch(nextDue_[index]);
-    Serial.println();
-  }
+  Serial.print(F("Saved schedule #")); Serial.print(createdId);
+  Serial.print(F(" ")); Serial.print(scheduleName(interval));
+  Serial.print(F(" for ")); Serial.print(durationValue);
+  Serial.print(' '); Serial.print(durationName(durationType));
+  Serial.print(F("; starts ")); printDateTime(record.startEpoch);
+  Serial.print(F("; expires ")); printDateTime(record.expirationEpoch);
+  Serial.println();
   return true;
 }
 
-bool Schedule::setTestMode(bool testMode) {
-  if (testMode_ == testMode) {
-    Serial.print(F("Operating mode already "));
-    Serial.println(testMode ? F("TEST") : F("PRODUCTION"));
-    return true;
-  }
-  if (count_ != 0) {
-    Serial.println(F("Mode change ignored while a reminder is pending or dispensing."));
-    return false;
-  }
+void Schedule::removeAt(uint8_t index) {
+  if (index >= database_.count) return;
+  if (acknowledgedId_ == database_.records[index].id) acknowledgedId_ = 0;
+  for (uint8_t i = index; i + 1 < database_.count; ++i)
+    database_.records[i] = database_.records[i + 1];
+  --database_.count;
+  memset(&database_.records[database_.count], 0, sizeof(ScheduleRecord));
+}
 
-  uint32_t now;
-  if (!readRtc(now)) {
-    Serial.println(F("ERROR: cannot change mode until DS3231 time is valid."));
-    return false;
-  }
-
-  testMode_ = testMode;
-  EEPROM.update(kEepromModeAddress, testMode_ ? kEepromModeTest : kEepromModeProduction);
-  for (uint8_t i = 0; i < kScheduleCount; ++i)
-    nextDue_[i] = enabled_[i] ? now + intervalSeconds((TimeSchedule)i) : 0;
-
-  Serial.print(F("Operating mode changed to "));
-  Serial.println(testMode_ ? F("TEST") : F("PRODUCTION"));
-  printScheduleStatus(now);
+bool Schedule::deleteScheduleAt(uint8_t index) {
+  if (index >= database_.count) return false;
+  const uint16_t deletedId = database_.records[index].id;
+  removeAt(index);
+  saveDatabase();
+  Serial.print(F("Deleted schedule #")); Serial.println(deletedId);
   return true;
 }
 
-void Schedule::enqueue(TimeSchedule schedule, uint32_t dueAt) {
-  const uint8_t index = (uint8_t)schedule;
-  if (queued_[index] || count_ >= kScheduleCount) return;
-  queue_[tail_] = schedule;
-  tail_ = (tail_ + 1) % kScheduleCount;
-  ++count_;
-  queued_[index] = true;
-  acknowledged_[index] = false;
-  pendingSince_[index] = dueAt;
-  Serial.print(F("Reminder queued: ")); Serial.println(scheduleName(schedule));
+uint8_t Schedule::scheduleCount() const { return database_.count; }
+
+bool Schedule::scheduleAt(uint8_t index, ScheduleRecord &record) const {
+  if (index >= database_.count) return false;
+  record = database_.records[index];
+  return true;
 }
 
-bool Schedule::current(TimeSchedule &schedule) const {
-  if (count_ == 0) return false;
-  schedule = queue_[head_];
+bool Schedule::current(ScheduleRecord &record) const {
+  int8_t found = -1;
+  for (uint8_t i = 0; i < database_.count; ++i) {
+    const ScheduleRecord &candidate = database_.records[i];
+    if (candidate.status != kStatusActive || !candidate.reminderPending) continue;
+    if (found < 0 || candidate.pendingEpoch < database_.records[found].pendingEpoch)
+      found = i;
+  }
+  if (found < 0) return false;
+  record = database_.records[found];
   return true;
+}
+
+bool Schedule::acknowledgeCurrent() {
+  ScheduleRecord record;
+  if (!current(record)) return false;
+  acknowledgedId_ = record.id;
+  Serial.print(F("Personnel acknowledged schedule #")); Serial.println(record.id);
+  return true;
+}
+
+bool Schedule::isAcknowledged(uint16_t id) const {
+  return id != 0 && acknowledgedId_ == id;
+}
+
+void Schedule::completeCurrent(uint16_t id) {
+  for (uint8_t i = 0; i < database_.count; ++i) {
+    ScheduleRecord &record = database_.records[i];
+    if (record.id == id) {
+      record.reminderPending = 0;
+      record.pendingEpoch = 0;
+      acknowledgedId_ = 0;
+      saveDatabase();
+      Serial.print(F("Dispensing request completed for schedule #")); Serial.println(id);
+      return;
+    }
+  }
 }
 
 bool Schedule::currentTime(uint32_t &epoch) const {
@@ -244,129 +343,97 @@ bool Schedule::currentTime(uint32_t &epoch) const {
   return true;
 }
 
-bool Schedule::isRegistered(TimeSchedule schedule) const {
-  const uint8_t index = (uint8_t)schedule;
-  return index < kScheduleCount && enabled_[index];
-}
-
-void Schedule::acknowledgeCurrent() {
-  if (count_ == 0) return;
-  acknowledged_[(uint8_t)queue_[head_]] = true;
-}
-
-void Schedule::expireUnacknowledged(uint32_t now) {
-  uint8_t position = 0;
-  while (position < count_) {
-    const uint8_t slot = (head_ + position) % kScheduleCount;
-    const uint8_t index = (uint8_t)queue_[slot];
-    if (!acknowledged_[index] && now >= pendingSince_[index] &&
-        (uint32_t)(now - pendingSince_[index]) >= intervalSeconds((TimeSchedule)index)) {
-      Serial.print(F("MISSED reminder expired without personnel acknowledgment: "));
-      Serial.println(scheduleName((TimeSchedule)index));
-      queued_[index] = false;
-      for (uint8_t shift = position; shift + 1 < count_; ++shift) {
-        const uint8_t destination = (head_ + shift) % kScheduleCount;
-        const uint8_t source = (head_ + shift + 1) % kScheduleCount;
-        queue_[destination] = queue_[source];
-      }
-      tail_ = (tail_ + kScheduleCount - 1) % kScheduleCount;
-      --count_;
-      // Do not advance position: the next queued entry shifted into this slot.
-    } else {
-      ++position;
+bool Schedule::setTestMode(bool testMode) {
+  const uint8_t requested = testMode ? 1 : 0;
+  if (database_.mode == requested) return true;
+  if (acknowledgedId_ != 0) {
+    Serial.println(F("Mode change ignored while dispensing."));
+    return false;
+  }
+  for (uint8_t i = 0; i < database_.count; ++i) {
+    if (database_.records[i].reminderPending) {
+      Serial.println(F("Mode change ignored while a reminder is pending."));
+      return false;
     }
   }
+  uint32_t now;
+  if (!readRtc(now)) {
+    Serial.println(F("ERROR: mode not changed; DS3231 time is invalid."));
+    return false;
+  }
+  database_.mode = requested;
+  for (uint8_t i = 0; i < database_.count; ++i)
+    database_.records[i].nextReminderEpoch = now +
+      intervalSeconds((TimeSchedule)database_.records[i].intervalHours);
+  saveDatabase();
+  Serial.print(F("Operating mode changed to "));
+  Serial.println(testMode ? F("TEST") : F("PRODUCTION"));
+  return true;
 }
 
-void Schedule::completeCurrent() {
-  if (count_ == 0) return;
-  const TimeSchedule done = queue_[head_];
-  head_ = (head_ + 1) % kScheduleCount;
-  --count_;
-  queued_[(uint8_t)done] = false;
-  acknowledged_[(uint8_t)done] = false;
-  Serial.print(F("Dispensing workflow complete: ")); Serial.println(scheduleName(done));
-}
-
-void Schedule::printScheduleStatus(uint32_t now) {
-  for (uint8_t i = 0; i < kScheduleCount; ++i) {
-    const TimeSchedule schedule = (TimeSchedule)i;
-    Serial.print(scheduleName(schedule)); Serial.print(F(" interval="));
-    Serial.print(intervalSeconds(schedule)); Serial.print(F("s "));
-    if (!enabled_[i]) {
-      Serial.println(F("not registered"));
+void Schedule::processSchedules(uint32_t now) {
+  bool changed = false;
+  uint8_t index = 0;
+  while (index < database_.count) {
+    ScheduleRecord &record = database_.records[index];
+    if (now >= record.expirationEpoch) {
+      if (record.id == acknowledgedId_) {
+        // Finish a dispense already acknowledged before expiring its record.
+        ++index;
+        continue;
+      }
+      record.status = kStatusExpired;
+      Serial.print(F("Schedule expired and removed from EEPROM: #"));
+      Serial.println(record.id);
+      removeAt(index);
+      changed = true;
       continue;
     }
-    Serial.print(F("next=")); printEpoch(nextDue_[i]);
-    if (queued_[i]) Serial.print(F(" pending/active"));
-    Serial.print(F(" (in "));
-    Serial.print(nextDue_[i] > now ? nextDue_[i] - now : 0);
-    Serial.println(F("s)"));
+
+    const uint32_t interval = intervalSeconds((TimeSchedule)record.intervalHours);
+    if (record.reminderPending) {
+      if (now >= record.pendingEpoch && now - record.pendingEpoch >= interval) {
+        Serial.print(F("Unacknowledged reminder expired safely: #"));
+        Serial.println(record.id);
+        record.reminderPending = 0;
+        record.pendingEpoch = 0;
+        if (acknowledgedId_ == record.id) acknowledgedId_ = 0;
+        while (record.nextReminderEpoch <= now)
+          record.nextReminderEpoch += interval;
+        changed = true;
+      }
+    } else if (now >= record.nextReminderEpoch) {
+      const uint32_t lateBy = now - record.nextReminderEpoch;
+      if (lateBy >= interval) {
+        const uint32_t skipped = lateBy / interval + 1;
+        record.nextReminderEpoch += skipped * interval;
+        Serial.print(F("Missed reminder skipped; schedule #")); Serial.println(record.id);
+      } else {
+        record.reminderPending = 1;
+        record.pendingEpoch = record.nextReminderEpoch;
+        record.nextReminderEpoch += interval;
+        Serial.print(F("Reminder due for schedule #")); Serial.println(record.id);
+      }
+      changed = true;
+    }
+    ++index;
   }
+  if (changed) saveDatabase();
 }
 
 void Schedule::loop() {
-  const uint32_t pollStarted = millis();
-  if (hasPolledRtc_ && (uint32_t)(pollStarted - lastRtcPoll_) < 250UL) return;
+  const uint32_t tick = millis();
+  if (hasPolledRtc_ && (uint32_t)(tick - lastRtcPoll_) < 250UL) return;
   hasPolledRtc_ = true;
-  lastRtcPoll_ = pollStarted;
+  lastRtcPoll_ = tick;
 
   uint32_t now;
   if (!readRtc(now)) {
-    if (rtcReady_) Serial.println(F("ERROR: DS3231 read failed or time is invalid; scheduling paused."));
+    if (rtcReady_) Serial.println(F("ERROR: DS3231 unavailable; schedule clock paused."));
     rtcReady_ = false;
     return;
   }
+  rtcReady_ = true;
   currentEpoch_ = now;
-
-  if (!rtcReady_) {
-    rtcReady_ = true;
-    if (!initialized_) {
-      for (uint8_t i = 0; i < kScheduleCount; ++i)
-        if (enabled_[i]) nextDue_[i] = now + intervalSeconds((TimeSchedule)i);
-      initialized_ = true;
-      Serial.print(F("DS3231 time: ")); printClock(now); Serial.println();
-      printScheduleStatus(now);
-    } else {
-      Serial.println(F("DS3231 recovered; existing reminder deadlines retained."));
-    }
-  }
-
-  if ((uint32_t)(millis() - lastClockLog_) >= 1000UL) {
-    lastClockLog_ = millis();
-    Serial.print(F("DS3231 time: ")); printClock(now); Serial.println();
-  }
-  if ((uint32_t)(millis() - lastScheduleLog_) >= 60000UL) {
-    lastScheduleLog_ = millis();
-    printScheduleStatus(now);
-  }
-
-  expireUnacknowledged(now);
-  for (uint8_t i = 0; i < kScheduleCount; ++i) {
-    if (!enabled_[i]) continue;
-    if (now < nextDue_[i]) continue;
-    const TimeSchedule schedule = (TimeSchedule)i;
-    const uint32_t interval = intervalSeconds(schedule);
-    const uint32_t missed = (now - nextDue_[i]) / interval;
-    if (missed > 0) {
-      Serial.print(F("MISSED schedule(s): ")); Serial.print(scheduleName(schedule));
-      Serial.print(F(" count=")); Serial.println(missed);
-    }
-    // Coalesce missed periods into one request. Never build a backlog of doses.
-    const uint32_t due = nextDue_[i];
-    nextDue_[i] += (missed + 1) * interval;
-    if (missed > 0) {
-      Serial.print(F("MISSED reminder skipped safely (no automatic dispense): "));
-      Serial.println(scheduleName(schedule));
-      continue;
-    }
-    if (queued_[i]) {
-      Serial.print(F("Due time coalesced; reminder already pending/active: "));
-      Serial.println(scheduleName(schedule));
-    } else {
-      Serial.print(F("Reminder due at ")); printEpoch(due); Serial.print(F(": "));
-      Serial.println(scheduleName(schedule));
-      enqueue(schedule, due);
-    }
-  }
+  processSchedules(now);
 }
