@@ -17,16 +17,16 @@ The sketch reads but does not set the DS3231 clock. Set its date and time before
 
 | Function | Pin |
 | --- | ---: |
-| NEXT button | 41 |
-| PREVIOUS button | 43 |
-| SAVE / confirm / reminder acknowledgment button | 45 |
-| BACK / cancel button | 47 |
-| MODE / schedule-menu button | 39 |
-| Every 4 hours servo / IR sensor | 5 / 11 |
-| Every 6 hours servo / IR sensor | 6 / 12 |
-| Every 8 hours servo / IR sensor | 4 / 10 |
-| Every 12 hours servo / IR sensor | 7 / 13 |
-| Spoon servo | 3 |
+| NEXT button | 41 Yellow Wire|
+| PREVIOUS button | 43 Green Wire|
+| SAVE / confirm / reminder acknowledgment button | 45 Blue Wire|
+| BACK / cancel button | 47 Violet Wire|
+| MODE / schedule-menu button | 39 Orange Wire|
+| Every 4 hours servo / IR sensor | 5 Green Wire / 11 Green Wire |
+| Every 6 hours servo / IR sensor | 6 Yellow Wire / 12 Yellow Wire |
+| Every 8 hours servo / IR sensor | 4 Blue Wire / 10 Blue Wire |
+| Every 12 hours servo / IR sensor | 7 Orange Wire / 13 Orange Wire |
+| Spoon servo | 3 Violet Wire |
 | Relay / buzzer | 40 / 46 |
 | Green LED / red LED | 49 / 48 |
 
