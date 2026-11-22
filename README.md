@@ -25,10 +25,10 @@ The sketch reads but does not set the DS3231 clock. Set its date and time before
 | Every 4 hours servo / IR sensor | 5 Green Wire / 11 Green Wire |
 | Every 6 hours servo / IR sensor | 6 Yellow Wire / 12 Yellow Wire |
 | Every 8 hours servo / IR sensor | 4 Blue Wire / 10 Blue Wire |
-| Every 12 hours servo / IR sensor | 7 Orange Wire / 13 Orange Wire |
+| Every 12 hours servo/ IR sensor | 7 Orange Wire / 13 Orange Wire |
 | Spoon servo | 3 Violet Wire |
-| Relay / buzzer | 40 / 46 |
-| Green LED / red LED | 49 / 48 |
+| Relay / buzzer | 40 Yellow / 42 Green |
+| Green LED / red LED | 44 Blue / 46 Green |
 
 All buttons use `INPUT_PULLUP`: connect one side to the assigned pin and the other side to GND. A pressed button reads LOW. The IR sensors are configured active-low; change `IR_ACTIVE_LEVEL` in `deviceConfig.h` if your sensor output polarity differs.
 
