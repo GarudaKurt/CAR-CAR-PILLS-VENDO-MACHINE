@@ -29,7 +29,8 @@ The sketch reads but does not set the DS3231 clock. Set its date and time before
 | Spoon servo | 3 Violet Wire |
 | Relay / buzzer | 40 Yellow / 42 Green |
 | Green LED / red LED | 44 Blue / 46 Green |
-
+| LCD I2C | 21 SDA VIOLET / 22 SCL GRAY |
+| RTC I2C | SDA WHITE / SCL BROWN |
 All buttons use `INPUT_PULLUP`: connect one side to the assigned pin and the other side to GND. A pressed button reads LOW. The IR sensors are configured active-low; change `IR_ACTIVE_LEVEL` in `deviceConfig.h` if your sensor output polarity differs.
 
 ## Button controls
